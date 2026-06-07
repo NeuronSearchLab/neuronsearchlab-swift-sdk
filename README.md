@@ -147,4 +147,4 @@ swift test
 
 ## Related SDKs
 
-- JavaScript / TypeScript: https://github.com/NeuronSearchLab/neuronsearchlab-sdk
+- JavaScript / TypeScript: https://github.com/NeuronSearchLab/neuronsearchlab-sdk-js
