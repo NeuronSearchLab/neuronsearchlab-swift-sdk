@@ -1,0 +1,150 @@
+# NeuronSearchLab Swift SDK
+
+Native Swift client and structured logger for the NeuronSearchLab Core API on iOS, macOS, tvOS, and watchOS.
+
+This SDK is implemented in Swift using `URLSession` and Swift concurrency. It does not bridge to JavaScript or require a WebView.
+
+## Requirements
+
+- iOS 15+
+- macOS 12+
+- tvOS 15+
+- watchOS 8+
+- Swift 5.9+
+
+## Installation
+
+In Xcode, choose **File > Add Package Dependencies...**, then add:
+
+```text
+https://github.com/NeuronSearchLab/neuronsearchlab-swift-sdk.git
+```
+
+Select the `NeuronSearchLabSDK` product and import the module:
+
+```swift
+import NeuronSearchLab
+```
+
+For Swift Package Manager:
+
+```swift
+dependencies: [
+  .package(url: "https://github.com/NeuronSearchLab/neuronsearchlab-swift-sdk.git", from: "1.0.0")
+],
+targets: [
+  .target(
+    name: "YourApp",
+    dependencies: [
+      .product(name: "NeuronSearchLabSDK", package: "neuronsearchlab-swift-sdk")
+    ]
+  )
+]
+```
+
+Swift Package Manager resolves versions from git tags. Until a release tag exists, use a branch dependency:
+
+```swift
+.package(url: "https://github.com/NeuronSearchLab/neuronsearchlab-swift-sdk.git", branch: "main")
+```
+
+## Quick Start
+
+```swift
+import NeuronSearchLab
+
+let sdk = try NeuronSDK(
+  SDKConfig(
+    baseURL: "https://api.neuronsearchlab.com/v1",
+    accessToken: token,
+    collateWindowSeconds: 3,
+    maxBatchSize: 200,
+    maxBufferedEvents: 5_000
+  )
+)
+
+let itemId: NeuronID = "3187"
+
+try await sdk.trackEvent(
+  TrackEventPayload(
+    type: "view",
+    userId: "42",
+    itemId: itemId,
+    metadata: ["action": "view"]
+  )
+)
+
+try await sdk.upsertItem(
+  ItemUpsertPayload(
+    id: itemId,
+    name: "Premier League Highlights",
+    description: "Matchday recap",
+    metadata: ["league": "EPL"]
+  )
+)
+
+try await sdk.patchItem(
+  PatchItemInput(
+    itemId: itemId,
+    additionalFields: ["name": "Premier League Highlights v2"]
+  )
+)
+
+try await sdk.deleteItems(DeleteItemInput(itemId: itemId))
+
+let recs = try await sdk.getRecommendations(
+  RecommendationOptions(
+    userId: "42",
+    contextId: "homepage",
+    limit: 5
+  )
+)
+
+let results = try await sdk.search(
+  SearchOptions(
+    query: "latest football highlights",
+    userId: "42",
+    contextId: "homepage",
+    limit: 5,
+    filters: .strings(["category:sports"])
+  )
+)
+```
+
+## API
+
+The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
+
+| Method | Notes |
+| --- | --- |
+| `trackEvent(_:)` / `createEvent(_:)` | Buffers events, batches to `/v1/events`, retries transient failures, and attaches `client_ts`, `request_id`, and `session_id` when available. |
+| `flushEvents()` | Immediately flushes buffered events. |
+| `upsertItem(_:)` / `upsertItems(_:)` / `createItem(_:)` | Creates or updates catalogue items via `/v1/items`. |
+| `patchItem(_:)` / `setItemActive(itemId:active:)` | Updates a single item via `/v1/items/{item_id}`. |
+| `deleteItems(_:)` | Deletes one or more items via `/v1/items/{item_id}`. |
+| `getRecommendations(_:)` | Gets personalized recommendations and captures returned `request_id`. |
+| `getAutoRecommendations(_:)` | Gets the next auto-generated recommendation section. |
+| `search(_:)` | Runs query-driven retrieval through `/v1/search` and captures returned `request_id`. |
+
+## Logging
+
+```swift
+configureLogger(
+  LoggerConfiguration(
+    level: .debug,
+    enablePerformanceLogging: true
+  )
+)
+```
+
+Network payload logging is disabled by default to avoid leaking sensitive data.
+
+## Development
+
+```bash
+swift test
+```
+
+## Related SDKs
+
+- JavaScript / TypeScript: https://github.com/NeuronSearchLab/neuronsearchlab-sdk

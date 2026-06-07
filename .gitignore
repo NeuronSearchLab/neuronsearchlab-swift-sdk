@@ -1,0 +1,16 @@
+.build/
+.swiftpm/
+DerivedData/
+
+# Logs
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Env
+.env
+.env.local
+.env.*.local
