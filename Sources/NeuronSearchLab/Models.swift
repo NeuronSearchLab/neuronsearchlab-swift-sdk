@@ -107,11 +107,10 @@ public struct SDKConfig: Sendable {
 }
 
 public struct TrackEventPayload: Sendable {
-  public var type: String?
-  public var eventType: String?
-  public var eventId: NeuronID?
+  public var eventId: Int?
   public var userId: NeuronID?
-  public var itemId: NeuronID?
+  public var itemId: Int?
+  public var contextId: Int?
   public var occurredAt: Int?
   public var requestId: String?
   public var sessionId: String?
@@ -119,22 +118,20 @@ public struct TrackEventPayload: Sendable {
   public var additionalFields: JSONObject
 
   public init(
-    type: String? = nil,
-    eventType: String? = nil,
-    eventId: NeuronID? = nil,
+    eventId: Int? = nil,
     userId: NeuronID? = nil,
-    itemId: NeuronID? = nil,
+    itemId: Int? = nil,
+    contextId: Int? = nil,
     occurredAt: Int? = nil,
     requestId: String? = nil,
     sessionId: String? = nil,
     metadata: JSONObject? = nil,
     additionalFields: JSONObject = [:]
   ) {
-    self.type = type
-    self.eventType = eventType
     self.eventId = eventId
     self.userId = userId
     self.itemId = itemId
+    self.contextId = contextId
     self.occurredAt = occurredAt
     self.requestId = requestId
     self.sessionId = sessionId
@@ -144,13 +141,13 @@ public struct TrackEventPayload: Sendable {
 
   func normalized(now: Date = Date()) throws -> JSONObject {
     let userIdValue = userId?.normalized
-    let itemIdValue = itemId?.normalized
-    let typeValue = normalizeOptionalString(type) ??
-      normalizeOptionalString(eventType) ??
-      eventId?.normalized
-
-    guard let userIdValue, let itemIdValue, let typeValue else {
-      throw SDKClientError.validation("type, userId, and itemId are required")
+    guard let userIdValue,
+          let itemId, itemId > 0,
+          let eventId, eventId != 0 else {
+      throw SDKClientError.validation("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required")
+    }
+    if let contextId, contextId <= 0 {
+      throw SDKClientError.validation("contextId must be a positive integer when provided")
     }
 
     var payload = additionalFields
@@ -165,28 +162,26 @@ public struct TrackEventPayload: Sendable {
     }
 
     payload["user_id"] = .string(userIdValue)
-    payload["item_id"] = .string(itemIdValue)
-    payload["type"] = .string(typeValue)
+    payload["item_id"] = .int(itemId)
+    payload["event_id"] = .int(eventId)
+    if let contextId { payload["context_id"] = .int(contextId) }
     payload["occurred_at"] = .int(occurredAt ?? Int(floor(now.timeIntervalSince1970)))
     return payload
   }
 }
 
 public struct ItemUpsertPayload: Sendable {
-  public var id: NeuronID?
   public var name: String?
   public var description: String?
   public var metadata: JSONObject?
   public var additionalFields: JSONObject
 
   public init(
-    id: NeuronID? = nil,
     name: String? = nil,
     description: String? = nil,
     metadata: JSONObject? = nil,
     additionalFields: JSONObject = [:]
   ) {
-    self.id = id
     self.name = name
     self.description = description
     self.metadata = metadata
@@ -195,12 +190,6 @@ public struct ItemUpsertPayload: Sendable {
 
   func normalized() throws -> JSONObject {
     var payload = additionalFields
-    if let id {
-      guard let normalizedId = id.normalized else {
-        throw SDKClientError.validation("item id must be a non-empty string or number")
-      }
-      payload["id"] = .string(normalizedId)
-    }
     if let name {
       payload["name"] = .string(name)
     }
@@ -215,12 +204,12 @@ public struct ItemUpsertPayload: Sendable {
 }
 
 public struct PatchItemInput: Sendable {
-  public var itemId: NeuronID
+  public var itemId: Int
   public var active: Bool?
   public var additionalFields: JSONObject
 
   public init(
-    itemId: NeuronID,
+    itemId: Int,
     active: Bool? = nil,
     additionalFields: JSONObject = [:]
   ) {
@@ -230,8 +219,8 @@ public struct PatchItemInput: Sendable {
   }
 
   func patchPayload() throws -> JSONObject {
-    guard itemId.normalized != nil else {
-      throw SDKClientError.validation("itemId is required and must be a non-empty string or number")
+    guard itemId > 0 else {
+      throw SDKClientError.validation("itemId is required and must be a positive integer returned by NSL")
     }
 
     var payload = additionalFields
@@ -246,32 +235,29 @@ public struct PatchItemInput: Sendable {
 }
 
 public struct DeleteItemInput: Sendable {
-  public var itemId: NeuronID
+  public var itemId: Int
 
-  public init(itemId: NeuronID) {
+  public init(itemId: Int) {
     self.itemId = itemId
   }
 }
 
 public struct RecommendationOptions: Sendable {
   public var userId: NeuronID
-  public var contextId: String?
-  public var contextKey: String?
+  public var contextId: Int?
   public var scope: JSONObject?
   public var limit: Int?
   public var startingAfter: String?
 
   public init(
     userId: NeuronID,
-    contextId: String? = nil,
-    contextKey: String? = nil,
+    contextId: Int? = nil,
     scope: JSONObject? = nil,
     limit: Int? = nil,
     startingAfter: String? = nil
   ) {
     self.userId = userId
     self.contextId = contextId
-    self.contextKey = contextKey
     self.scope = scope
     self.limit = limit
     self.startingAfter = startingAfter
@@ -280,8 +266,7 @@ public struct RecommendationOptions: Sendable {
 
 public struct AutoRecommendationsOptions: Sendable {
   public var userId: NeuronID
-  public var contextId: String?
-  public var contextKey: String?
+  public var contextId: Int?
   public var scope: JSONObject?
   public var limit: Int?
   public var cursor: String?
@@ -291,8 +276,7 @@ public struct AutoRecommendationsOptions: Sendable {
 
   public init(
     userId: NeuronID,
-    contextId: String? = nil,
-    contextKey: String? = nil,
+    contextId: Int? = nil,
     scope: JSONObject? = nil,
     limit: Int? = nil,
     cursor: String? = nil,
@@ -302,7 +286,6 @@ public struct AutoRecommendationsOptions: Sendable {
   ) {
     self.userId = userId
     self.contextId = contextId
-    self.contextKey = contextKey
     self.scope = scope
     self.limit = limit
     self.cursor = cursor
@@ -340,8 +323,7 @@ public enum SearchFilters: Sendable {
 public struct SearchOptions: Sendable {
   public var query: String
   public var userId: NeuronID?
-  public var contextId: String?
-  public var contextKey: String?
+  public var contextId: Int?
   public var limit: Int?
   public var filters: SearchFilters?
   public var scope: JSONValue?
@@ -358,8 +340,7 @@ public struct SearchOptions: Sendable {
   public init(
     query: String,
     userId: NeuronID? = nil,
-    contextId: String? = nil,
-    contextKey: String? = nil,
+    contextId: Int? = nil,
     limit: Int? = nil,
     filters: SearchFilters? = nil,
     scope: JSONValue? = nil,
@@ -376,7 +357,6 @@ public struct SearchOptions: Sendable {
     self.query = query
     self.userId = userId
     self.contextId = contextId
-    self.contextKey = contextKey
     self.limit = limit
     self.filters = filters
     self.scope = scope
@@ -400,11 +380,11 @@ public struct SearchOptions: Sendable {
     if let userId = userId?.normalized {
       payload["user_id"] = .string(userId)
     }
-    if let contextId = normalizeOptionalString(contextId) {
-      payload["context_id"] = .string(contextId)
-    }
-    if let contextKey = normalizeOptionalString(contextKey) {
-      payload["context_key"] = .string(contextKey)
+    if let contextId {
+      guard contextId > 0 else {
+        throw SDKClientError.validation("contextId must be a positive integer")
+      }
+      payload["context_id"] = .int(contextId)
     }
     if let limit {
       payload["limit"] = .string(String(limit))
@@ -496,10 +476,10 @@ public struct RecommendationResource: Codable, Equatable, Sendable {
     try raw.encode(to: encoder)
   }
 
-  public var id: String? { raw["id"]?.stringValue }
+  public var id: Int? { raw["id"]?.intValue }
   public var object: String? { raw["object"]?.stringValue }
-  public var itemId: String? { raw["item_id"]?.stringValue }
-  public var entityId: String? { raw["entity_id"]?.stringValue }
+  public var itemId: Int? { raw["item_id"]?.intValue }
+  public var entityId: Int? { raw["entity_id"]?.intValue }
   public var name: String? { raw["name"]?.stringValue }
   public var description: String? { raw["description"]?.stringValue }
   public var score: Double? { raw["score"]?.doubleValue }
@@ -575,7 +555,7 @@ public struct PatchItemResponse: Codable, Equatable, Sendable {
     try raw.encode(to: encoder)
   }
 
-  public var id: String? { raw["id"]?.stringValue }
+  public var id: Int? { raw["id"]?.intValue }
   public var object: String? { raw["object"]?.stringValue }
   public var message: String? { raw["message"]?.stringValue }
   public var active: Bool? { raw["active"]?.boolValue }
@@ -593,14 +573,14 @@ public struct DeleteItemsResponse: Codable, Equatable, Sendable {
   public init(
     message: String,
     object: String = "list",
-    itemIds: [String],
+    itemIds: [Int],
     deletedCount: Int,
     data: [JSONValue]
   ) {
     raw = [
       "message": .string(message),
       "object": .string(object),
-      "itemIds": .array(itemIds.map { .string($0) }),
+      "itemIds": .array(itemIds.map { .int($0) }),
       "deletedCount": .int(deletedCount),
       "data": .array(data),
     ]
@@ -616,11 +596,11 @@ public struct DeleteItemsResponse: Codable, Equatable, Sendable {
 
   public var message: String? { raw["message"]?.stringValue }
   public var object: String? { raw["object"]?.stringValue }
-  public var id: String? { raw["id"]?.stringValue }
-  public var itemId: String? { raw["itemId"]?.stringValue ?? raw["item_id"]?.stringValue }
-  public var itemIds: [String] {
-    raw["itemIds"]?.arrayValue?.compactMap(\.stringValue) ??
-      raw["item_ids"]?.arrayValue?.compactMap(\.stringValue) ??
+  public var id: Int? { raw["id"]?.intValue }
+  public var itemId: Int? { raw["itemId"]?.intValue ?? raw["item_id"]?.intValue }
+  public var itemIds: [Int] {
+    raw["itemIds"]?.arrayValue?.compactMap(\.intValue) ??
+      raw["item_ids"]?.arrayValue?.compactMap(\.intValue) ??
       []
   }
   public var deletedCount: Int? { raw["deletedCount"]?.intValue ?? raw["deleted_count"]?.intValue }

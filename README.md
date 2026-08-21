@@ -63,23 +63,24 @@ let sdk = try NeuronSDK(
   )
 )
 
-let itemId: NeuronID = "3187"
-
-try await sdk.trackEvent(
-  TrackEventPayload(
-    type: "view",
-    userId: "42",
-    itemId: itemId,
-    metadata: ["action": "view"]
-  )
-)
-
-try await sdk.upsertItem(
+let created = try await sdk.upsertItem(
   ItemUpsertPayload(
-    id: itemId,
     name: "Premier League Highlights",
     description: "Matchday recap",
     metadata: ["league": "EPL"]
+  )
+)
+guard case .object(let item) = created, let itemId = item["id"]?.intValue else {
+  fatalError("NSL did not return an integer item ID")
+}
+
+try await sdk.trackEvent(
+  TrackEventPayload(
+    eventId: 42,
+    userId: "42",
+    itemId: itemId,
+    contextId: 101,
+    metadata: ["action": "view"]
   )
 )
 
@@ -95,7 +96,7 @@ try await sdk.deleteItems(DeleteItemInput(itemId: itemId))
 let recs = try await sdk.getRecommendations(
   RecommendationOptions(
     userId: "42",
-    contextId: "homepage",
+    contextId: 101,
     limit: 5
   )
 )
@@ -104,7 +105,7 @@ let results = try await sdk.search(
   SearchOptions(
     query: "latest football highlights",
     userId: "42",
-    contextId: "homepage",
+    contextId: 101,
     limit: 5,
     filters: .strings(["category:sports"])
   )
