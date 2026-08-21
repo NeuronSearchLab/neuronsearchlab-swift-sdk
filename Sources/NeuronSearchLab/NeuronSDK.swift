@@ -185,37 +185,35 @@ public final class NeuronSDK: @unchecked Sendable {
 
   public func patchItem(_ input: PatchItemInput) async throws -> PatchItemResponse {
     let patch = try input.patchPayload()
-    guard let itemId = input.itemId.normalized else {
-      throw SDKClientError.validation("itemId is required and must be a non-empty string or number")
-    }
+    let itemId = input.itemId
 
     return try await request(
-      "/items/\(Self.urlPathEncode(itemId))",
+      "/items/\(Self.urlPathEncode(String(itemId)))",
       method: "POST",
       body: .object(patch)
     )
   }
 
-  public func setItemActive(itemId: NeuronID, active: Bool) async throws -> PatchItemResponse {
+  public func setItemActive(itemId: Int, active: Bool) async throws -> PatchItemResponse {
     try await patchItem(PatchItemInput(itemId: itemId, active: active))
   }
 
   public func deleteItems(_ items: [DeleteItemInput]) async throws -> DeleteItemsResponse {
     guard !items.isEmpty else {
-      throw SDKClientError.validation("itemId is required and must be a non-empty string or number")
+      throw SDKClientError.validation("itemId is required and must be a positive integer returned by NSL")
     }
 
-    let itemIds = try items.map { item -> String in
-      guard let itemId = item.itemId.normalized else {
-        throw SDKClientError.validation("itemId is required and must be a non-empty string or number")
+    let itemIds = try items.map { item -> Int in
+      guard item.itemId > 0 else {
+        throw SDKClientError.validation("itemId is required and must be a positive integer returned by NSL")
       }
-      return itemId
+      return item.itemId
     }
 
     var responses: [JSONValue] = []
     for itemId in itemIds {
       let response: JSONValue = try await request(
-        "/items/\(Self.urlPathEncode(itemId))",
+        "/items/\(Self.urlPathEncode(String(itemId)))",
         method: "DELETE"
       )
       responses.append(response)
@@ -241,6 +239,9 @@ public final class NeuronSDK: @unchecked Sendable {
     guard let userId = options.userId.normalized else {
       throw SDKClientError.validation("userId must be a string or number")
     }
+    if let contextId = options.contextId, contextId <= 0 {
+      throw SDKClientError.validation("contextId must be a positive integer")
+    }
 
     let scope = try options.scope.map { try jsonString(from: .object($0)) }
     let response: RecommendationsResponse = try await request(
@@ -248,8 +249,7 @@ public final class NeuronSDK: @unchecked Sendable {
       method: "GET",
       queryItems: [
         URLQueryItem(name: "user_id", value: userId),
-        URLQueryItem(name: "context_id", value: normalizeOptionalString(options.contextId)),
-        URLQueryItem(name: "context_key", value: normalizeOptionalString(options.contextKey)),
+        URLQueryItem(name: "context_id", value: options.contextId.map(String.init)),
         URLQueryItem(name: "scope", value: scope),
         URLQueryItem(name: "limit", value: options.limit.map(String.init)),
         URLQueryItem(name: "starting_after", value: normalizeOptionalString(options.startingAfter)),
@@ -265,6 +265,9 @@ public final class NeuronSDK: @unchecked Sendable {
     guard let userId = options.userId.normalized else {
       throw SDKClientError.validation("userId must be a string or number")
     }
+    if let contextId = options.contextId, contextId <= 0 {
+      throw SDKClientError.validation("contextId must be a positive integer")
+    }
 
     let scope = try options.scope.map { try jsonString(from: .object($0)) }
     let response: RecommendationsResponse = try await request(
@@ -273,8 +276,7 @@ public final class NeuronSDK: @unchecked Sendable {
       queryItems: [
         URLQueryItem(name: "mode", value: "auto"),
         URLQueryItem(name: "user_id", value: userId),
-        URLQueryItem(name: "context_id", value: normalizeOptionalString(options.contextId)),
-        URLQueryItem(name: "context_key", value: normalizeOptionalString(options.contextKey)),
+        URLQueryItem(name: "context_id", value: options.contextId.map(String.init)),
         URLQueryItem(name: "scope", value: scope),
         URLQueryItem(name: "limit", value: options.limit.map(String.init)),
         URLQueryItem(name: "cursor", value: normalizeOptionalString(options.cursor)),

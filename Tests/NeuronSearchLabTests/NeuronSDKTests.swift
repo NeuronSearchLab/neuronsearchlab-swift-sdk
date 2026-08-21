@@ -23,13 +23,13 @@ final class NeuronSDKTests: XCTestCase {
 
     let first = Task {
       try await sdk.trackEvent(
-        TrackEventPayload(type: "view", userId: "u1", itemId: "i1")
+        TrackEventPayload(eventId: 41, userId: "u1", itemId: 1)
       )
     }
     try await Task.sleep(nanoseconds: 5_000_000)
     let second = Task {
       try await sdk.trackEvent(
-        TrackEventPayload(type: "click", userId: "u1", itemId: "i2")
+        TrackEventPayload(eventId: 42, userId: "u1", itemId: 2)
       )
     }
     _ = try await [first.value, second.value]
@@ -40,11 +40,11 @@ final class NeuronSDKTests: XCTestCase {
     let events = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [[String: Any]])
 
     XCTAssertEqual(events.count, 2)
-    XCTAssertEqual(events[0]["type"] as? String, "view")
+    XCTAssertEqual(events[0]["event_id"] as? Int, 41)
     XCTAssertEqual(events[0]["user_id"] as? String, "u1")
-    XCTAssertEqual(events[0]["item_id"] as? String, "i1")
-    XCTAssertEqual(events[1]["type"] as? String, "click")
-    XCTAssertEqual(events[1]["item_id"] as? String, "i2")
+    XCTAssertEqual(events[0]["item_id"] as? Int, 1)
+    XCTAssertEqual(events[1]["event_id"] as? Int, 42)
+    XCTAssertEqual(events[1]["item_id"] as? Int, 2)
     XCTAssertNotNil(events[0]["client_ts"])
     XCTAssertNotNil(events[1]["client_ts"])
   }
@@ -68,10 +68,10 @@ final class NeuronSDKTests: XCTestCase {
     )
 
     async let first = sdk.trackEvent(
-      TrackEventPayload(type: "view", userId: "u1", itemId: "i3")
+      TrackEventPayload(eventId: 41, userId: "u1", itemId: 3)
     )
     async let second = sdk.trackEvent(
-      TrackEventPayload(type: "click", userId: "u1", itemId: "i4")
+      TrackEventPayload(eventId: 42, userId: "u1", itemId: 4)
     )
     _ = try await [first, second]
 
@@ -121,7 +121,7 @@ final class NeuronSDKTests: XCTestCase {
       SearchOptions(
         query: " fresh tech ",
         userId: "u1",
-        contextId: "101",
+        contextId: 101,
         limit: 3,
         filters: .strings(["category:tech"]),
         queryRetrievalEnabled: true,
@@ -141,7 +141,7 @@ final class NeuronSDKTests: XCTestCase {
     let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: searchBody) as? [String: Any])
     XCTAssertEqual(payload["query"] as? String, "fresh tech")
     XCTAssertEqual(payload["user_id"] as? String, "u1")
-    XCTAssertEqual(payload["context_id"] as? String, "101")
+    XCTAssertEqual(payload["context_id"] as? Int, 101)
     XCTAssertEqual(payload["limit"] as? String, "3")
     XCTAssertEqual(payload["filter"] as? [String], ["category:tech"])
     XCTAssertEqual(payload["query_retrieval_enabled"] as? String, "true")
@@ -150,7 +150,7 @@ final class NeuronSDKTests: XCTestCase {
     XCTAssertEqual(payload["keyword_weight"] as? String, "0.3")
     XCTAssertEqual(payload["keyword_fields"] as? String, "name,description")
 
-    try await sdk.trackEvent(TrackEventPayload(type: "click", userId: "u1", itemId: "item-i30"))
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, userId: "u1", itemId: 30))
 
     let requestsAfterEvent = http.requests
     let eventBody = try XCTUnwrap(requestsAfterEvent[1].httpBody)
@@ -176,7 +176,7 @@ final class NeuronSDKTests: XCTestCase {
     let sdk = try makeSDK(baseURL: "https://api.example.com", http: http)
 
     let result = try await sdk.getRecommendations(
-      RecommendationOptions(userId: 42, contextId: "homepage", limit: 5)
+      RecommendationOptions(userId: 42, contextId: 101, limit: 5)
     )
 
     XCTAssertEqual(result.requestId, "rid-1")
