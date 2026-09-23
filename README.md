@@ -125,7 +125,30 @@ The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
 | `deleteItems(_:)` | Deletes one or more items via `/v1/items/{item_id}`. |
 | `getRecommendations(_:)` | Gets personalized recommendations and captures returned `request_id`. |
 | `getAutoRecommendations(_:)` | Gets the next auto-generated recommendation section. |
-| `search(_:)` | Runs query-driven retrieval through `/v1/search` and captures returned `request_id`. |
+| `search(_:)` | Runs query-driven retrieval through `/v1/search` and captures returned `request_id`. Pass `resultItemIds` when your own engine ran the query. |
+| `trackSearch(userId:query:resultItemIds:)` | Records a search as an event that steers the user's recommendations. |
+
+### Searches steer recommendations
+
+Every search is recorded as an event on your Search event type and weighs into that user's later recommendations by its weight, exactly as a tap or a purchase does. The results you send are kept as impressions, not as items the user chose.
+
+```swift
+// NSL runs the search.
+_ = try await sdk.search(SearchOptions(query: "waterproof trail shoes", userId: "user-123"))
+
+// Your engine ran it: record it with the ids it showed, and get
+// recommendations that complement them (those ids are left out).
+let extras = try await sdk.search(SearchOptions(
+  query: "waterproof trail shoes",
+  userId: "user-123",
+  resultItemIds: [1042, 1077, 1013]
+))
+
+// Record only. eventId is optional and defaults to your Search event.
+try await sdk.trackSearch(userId: "user-123", query: "waterproof trail shoes", resultItemIds: [1042, 1077])
+```
+
+When searches steered a recommendation response, `response.searchIntent` holds their share of the user's recent event weight and the queries involved.
 
 ## Logging
 
