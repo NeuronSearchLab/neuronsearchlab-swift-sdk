@@ -115,6 +115,13 @@ public struct TrackEventPayload: Sendable {
   public var requestId: String?
   public var sessionId: String?
   public var metadata: JSONObject?
+  /// What the user searched for. With no `itemId` this is a search event:
+  /// `eventId` becomes optional and defaults to the event your `search`
+  /// signal is bound to. With an `itemId`, the query is kept on the item
+  /// event as the search the user reached it from.
+  public var query: String?
+  /// Item ids your own search engine showed for `query`, in rank order.
+  public var resultItemIds: [Int]?
   public var additionalFields: JSONObject
 
   public init(
@@ -126,6 +133,8 @@ public struct TrackEventPayload: Sendable {
     requestId: String? = nil,
     sessionId: String? = nil,
     metadata: JSONObject? = nil,
+    query: String? = nil,
+    resultItemIds: [Int]? = nil,
     additionalFields: JSONObject = [:]
   ) {
     self.eventId = eventId
@@ -136,15 +145,37 @@ public struct TrackEventPayload: Sendable {
     self.requestId = requestId
     self.sessionId = sessionId
     self.metadata = metadata
+    self.query = query
+    self.resultItemIds = resultItemIds
     self.additionalFields = additionalFields
   }
 
   func normalized(now: Date = Date()) throws -> JSONObject {
     let userIdValue = userId?.normalized
-    guard let userIdValue,
-          let itemId, itemId > 0,
-          let eventId, eventId != 0 else {
-      throw SDKClientError.validation("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required")
+    let queryValue = normalizeOptionalString(query)
+    let isSearch = itemId == nil && queryValue != nil
+
+    guard let userIdValue else {
+      throw SDKClientError.validation(
+        isSearch
+          ? "userId is required"
+          : "eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)"
+      )
+    }
+    if isSearch {
+      if let eventId, eventId == 0 {
+        throw SDKClientError.validation("eventId must be a non-zero integer when provided")
+      }
+    } else {
+      guard let itemId, itemId > 0, let eventId, eventId != 0 else {
+        throw SDKClientError.validation("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)")
+      }
+    }
+    if let resultItemIds {
+      guard isSearch else {
+        throw SDKClientError.validation("resultItemIds is only accepted on a search event: a query without itemId")
+      }
+      try validateResultItemIds(resultItemIds)
     }
     if let contextId, contextId <= 0 {
       throw SDKClientError.validation("contextId must be a positive integer when provided")
@@ -162,11 +193,19 @@ public struct TrackEventPayload: Sendable {
     }
 
     payload["user_id"] = .string(userIdValue)
-    payload["item_id"] = .int(itemId)
-    payload["event_id"] = .int(eventId)
+    if let itemId { payload["item_id"] = .int(itemId) }
+    if let eventId { payload["event_id"] = .int(eventId) }
+    if let queryValue { payload["query"] = .string(queryValue) }
+    if let resultItemIds { payload["result_item_ids"] = .array(resultItemIds.map { .int($0) }) }
     if let contextId { payload["context_id"] = .int(contextId) }
     payload["occurred_at"] = .int(occurredAt ?? Int(floor(now.timeIntervalSince1970)))
     return payload
+  }
+}
+
+func validateResultItemIds(_ ids: [Int]) throws {
+  guard ids.allSatisfy({ $0 > 0 }) else {
+    throw SDKClientError.validation("resultItemIds must contain positive integer item ids returned by NSL")
   }
 }
 
@@ -336,6 +375,10 @@ public struct SearchOptions: Sendable {
   public var debug: Bool?
   public var explain: String?
   public var includeSuppressed: Bool?
+  /// Your own engine ran `query` and showed these item ids, in rank order.
+  /// NSL records the search with them and returns recommendations that
+  /// complement them; these ids are left out of the response.
+  public var resultItemIds: [Int]?
 
   public init(
     query: String,
@@ -352,9 +395,11 @@ public struct SearchOptions: Sendable {
     requestId: String? = nil,
     debug: Bool? = nil,
     explain: String? = nil,
-    includeSuppressed: Bool? = nil
+    includeSuppressed: Bool? = nil,
+    resultItemIds: [Int]? = nil
   ) {
     self.query = query
+    self.resultItemIds = resultItemIds
     self.userId = userId
     self.contextId = contextId
     self.limit = limit
@@ -391,6 +436,10 @@ public struct SearchOptions: Sendable {
     }
     if let requestId = normalizeOptionalString(requestId) {
       payload["request_id"] = .string(requestId)
+    }
+    if let resultItemIds {
+      try validateResultItemIds(resultItemIds)
+      payload["result_item_ids"] = .array(resultItemIds.map { .int($0) })
     }
 
     if let filters {
@@ -536,6 +585,10 @@ public struct RecommendationsResponse: Codable, Equatable, Sendable {
   public var done: Bool? { raw["done"]?.boolValue }
   public var query: String? { raw["query"]?.stringValue }
   public var url: String? { raw["url"]?.stringValue }
+  /// On a search: who ran it ("nsl" or "client") and whether it was recorded.
+  public var search: JSONObject? { raw["search"]?.objectValue }
+  /// On recommendations: how much the user's recent searches steered them.
+  public var searchIntent: JSONObject? { raw["search_intent"]?.objectValue }
 }
 
 public typealias SearchResponse = RecommendationsResponse

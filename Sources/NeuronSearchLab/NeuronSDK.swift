@@ -138,6 +138,32 @@ public final class NeuronSDK: @unchecked Sendable {
     }
   }
 
+  /// Record a search your own engine ran, as an event. It weighs into the
+  /// user's recommendations by the weight of your Search event, like any tap
+  /// or purchase. Use `search(_:)` with `resultItemIds` when you also want
+  /// NSL's recommendations back in the same call.
+  @discardableResult
+  public func trackSearch(
+    userId: NeuronID,
+    query: String,
+    resultItemIds: [Int]? = nil,
+    eventId: Int? = nil,
+    contextId: Int? = nil,
+    sessionId: String? = nil
+  ) async throws -> JSONValue {
+    guard normalizeOptionalString(query) != nil else {
+      throw SDKClientError.validation("query is required")
+    }
+    return try await trackEvent(TrackEventPayload(
+      eventId: eventId,
+      userId: userId,
+      contextId: contextId,
+      sessionId: sessionId,
+      query: query,
+      resultItemIds: resultItemIds
+    ))
+  }
+
   @discardableResult
   public func trackEvent(_ data: TrackEventPayload) async throws -> JSONValue {
     var payload = try data.normalized()

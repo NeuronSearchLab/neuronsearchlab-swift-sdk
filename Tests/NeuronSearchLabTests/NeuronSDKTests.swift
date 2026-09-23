@@ -183,6 +183,83 @@ final class NeuronSDKTests: XCTestCase {
     XCTAssertEqual(sdk.getRequestId(), "rid-1")
   }
 
+  func testSearchIsSentAsAnEvent() async throws {
+    let http = okLoader(#"{"success":true}"#)
+    let sdk = try makeSDK(http: http)
+
+    try await sdk.trackSearch(userId: "u1", query: " trail shoes ", resultItemIds: [3, 1, 2])
+    let event = try firstEvent(http.requests[0])
+    XCTAssertEqual(http.requests[0].url?.path, "/v1/events")
+    XCTAssertEqual(event["user_id"] as? String, "u1")
+    XCTAssertEqual(event["query"] as? String, "trail shoes")
+    XCTAssertEqual(event["result_item_ids"] as? [Int], [3, 1, 2])
+    XCTAssertNil(event["item_id"])
+    XCTAssertNil(event["event_id"])
+
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, userId: "u1", itemId: 3, query: "trail shoes"))
+    let click = try firstEvent(http.requests[1])
+    XCTAssertEqual(click["item_id"] as? Int, 3)
+    XCTAssertEqual(click["event_id"] as? Int, 42)
+    XCTAssertEqual(click["query"] as? String, "trail shoes")
+  }
+
+  func testRejectsMalformedSearchEvents() async throws {
+    let http = okLoader(#"{"success":true}"#)
+    let sdk = try makeSDK(http: http)
+
+    await assertValidationError(containing: "query is required") {
+      try await sdk.trackSearch(userId: "u1", query: "  ")
+    }
+    await assertValidationError(containing: "search event") {
+      try await sdk.trackEvent(TrackEventPayload(userId: "u1"))
+    }
+    await assertValidationError(containing: "only accepted on a search event") {
+      try await sdk.trackEvent(TrackEventPayload(eventId: 42, userId: "u1", itemId: 3, resultItemIds: [1]))
+    }
+    await assertValidationError(containing: "positive integer") {
+      try await sdk.trackSearch(userId: "u1", query: "x", resultItemIds: [0])
+    }
+    XCTAssertEqual(http.requests.count, 0)
+  }
+
+  func testSearchForwardsYourEnginesResults() async throws {
+    let http = okLoader(#"{"object":"list","url":"/v1/search","data":[],"recommendations":[],"search":{"source":"client"}}"#)
+    let sdk = try makeSDK(http: http)
+
+    let result = try await sdk.search(SearchOptions(query: "trail shoes", userId: "u1", resultItemIds: [7, 8]))
+    let body = try XCTUnwrap(http.requests[0].httpBody)
+    let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+    XCTAssertEqual(payload["result_item_ids"] as? [Int], [7, 8])
+    XCTAssertEqual(result.search?["source"]?.stringValue, "client")
+  }
+
+  private func okLoader(_ body: String) -> MockHTTPDataLoader {
+    MockHTTPDataLoader { request in
+      (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body.data(using: .utf8)!)
+    }
+  }
+
+  private func firstEvent(_ request: URLRequest) throws -> [String: Any] {
+    let body = try XCTUnwrap(request.httpBody)
+    let json = try JSONSerialization.jsonObject(with: body)
+    if let list = json as? [[String: Any]] { return try XCTUnwrap(list.first) }
+    return try XCTUnwrap(json as? [String: Any])
+  }
+
+  private func assertValidationError(
+    containing message: String,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ body: () async throws -> Void
+  ) async {
+    do {
+      try await body()
+      XCTFail("Expected a validation error containing: \(message)", file: file, line: line)
+    } catch {
+      XCTAssertTrue(String(describing: error).contains(message), "Unexpected error: \(error)", file: file, line: line)
+    }
+  }
+
   private func makeSDK(
     baseURL: String = "https://api.example.com/v1",
     http: MockHTTPDataLoader,
