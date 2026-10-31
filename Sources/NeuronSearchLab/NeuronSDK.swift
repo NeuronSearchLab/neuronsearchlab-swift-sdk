@@ -37,6 +37,9 @@ public struct SDKTimeoutError: Error, LocalizedError, Sendable {
 }
 
 public final class NeuronSDK: @unchecked Sendable {
+  /// The most recommendation sets the API serves in one batch; larger calls are split.
+  public static let maxRecommendationSetsPerBatch = 8
+
   private struct BufferedEvent {
     let payload: JSONObject
     let continuation: CheckedContinuation<JSONValue, Error>
@@ -285,6 +288,71 @@ public final class NeuronSDK: @unchecked Sendable {
     return response
   }
 
+  /// Every recommendation rail a page needs, in one request
+  /// (`POST /v1/recommendations/batch`).
+  ///
+  /// Each set is served and billed on its own, with its own request id for
+  /// event attribution, but the visitor's state is read once for the page. A
+  /// set that fails carries its own `error` without failing the others. More
+  /// than `maxRecommendationSetsPerBatch` sets are sent as several batches.
+  public func getRecommendationSets(
+    _ options: RecommendationSetsOptions
+  ) async throws -> RecommendationSetsResponse {
+    guard !options.sets.isEmpty else {
+      throw SDKClientError.validation("sets must be a non-empty array")
+    }
+    var keys = Set<String>()
+    for set in options.sets {
+      guard set.key.range(of: #"^[A-Za-z0-9_.:-]{1,64}$"#, options: .regularExpression) != nil else {
+        throw SDKClientError.validation("Set key \"\(set.key)\" must match [A-Za-z0-9_.:-]{1,64}")
+      }
+      guard keys.insert(set.key).inserted else {
+        throw SDKClientError.validation("Duplicate set key \"\(set.key)\"")
+      }
+      guard set.contextId > 0 else {
+        throw SDKClientError.validation("Set \"\(set.key)\": contextId must be a positive integer")
+      }
+    }
+
+    let requestId = normalizeOptionalString(options.requestId) ?? UUID().uuidString.lowercased()
+    let perBatch = NeuronSDK.maxRecommendationSetsPerBatch
+    var results: [RecommendationSetResult] = []
+    var usage: [String: Int] = ["sets": 0, "computed": 0, "reused": 0, "coalesced": 0]
+
+    for (index, start) in stride(from: 0, to: options.sets.count, by: perBatch).enumerated() {
+      let chunk = options.sets[start..<min(start + perBatch, options.sets.count)]
+      // Each chunk is its own batch, so each needs its own idempotency key.
+      let chunkRequestId = index == 0 ? requestId : UUID().uuidString.lowercased()
+      var body: JSONObject = [
+        "request_id": .string(chunkRequestId),
+        "requests": .array(chunk.map { $0.normalized() }),
+      ]
+      if let userId = options.userId?.normalized { body["user_id"] = .string(userId) }
+      if let anonymousId = normalizeOptionalString(options.anonymousId) { body["anonymous_id"] = .string(anonymousId) }
+      if let sessionId = normalizeOptionalString(options.sessionId) { body["session_id"] = .string(sessionId) }
+
+      let response: JSONValue = try await request(
+        "/recommendations/batch",
+        method: "POST",
+        body: .object(body),
+        headers: ["X-Request-Id": chunkRequestId]
+      )
+      let object = response.objectValue ?? [:]
+      results += (object["results"]?.arrayValue ?? []).compactMap { value in
+        value.objectValue.map(RecommendationSetResult.init(raw:))
+      }
+      for (field, value) in object["usage"]?.objectValue ?? [:] {
+        usage[field, default: 0] += value.intValue ?? 0
+      }
+    }
+
+    return RecommendationSetsResponse(
+      requestId: requestId,
+      results: results,
+      usage: usage.mapValues { JSONValue.int($0) }
+    )
+  }
+
   public func getAutoRecommendations(
     _ options: AutoRecommendationsOptions
   ) async throws -> RecommendationsResponse {
@@ -528,6 +596,7 @@ public final class NeuronSDK: @unchecked Sendable {
     method: String,
     queryItems: [URLQueryItem] = [],
     body: JSONValue? = nil,
+    headers: [String: String] = [:],
     retryOn: Set<Int> = [429, 500, 502, 503, 504]
   ) async throws -> T {
     let state = stateQueue.sync {
@@ -552,6 +621,9 @@ public final class NeuronSDK: @unchecked Sendable {
       mutableRequest.timeoutInterval = state.timeoutSeconds
       mutableRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
       mutableRequest.setValue("Bearer \(state.accessToken)", forHTTPHeaderField: "Authorization")
+      for (name, value) in headers {
+        mutableRequest.setValue(value, forHTTPHeaderField: name)
+      }
       mutableRequest.httpBody = encodedBody
       let request = mutableRequest as URLRequest
 
