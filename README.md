@@ -112,6 +112,32 @@ let results = try await sdk.search(
 )
 ```
 
+### Several rails on one screen
+
+A screen with several recommendation rails should fetch them together. One
+request reads the visitor's state once; each set is still served, attributed
+and billed on its own.
+
+```swift
+let page = try await sdk.getRecommendationSets(
+  RecommendationSetsOptions(
+    userId: "42",
+    sets: [
+      RecommendationSetRequest(key: "for_you", contextId: 101, limit: 12),
+      RecommendationSetRequest(key: "trending", contextId: 102, limit: 8),
+      RecommendationSetRequest(key: "similar", contextId: 103, limit: 4, itemId: 5501),
+    ]
+  )
+)
+
+page.sets["for_you"]?.data          // the items for that rail
+page.sets["similar"]?.requestId     // pass this with events from that rail
+page.sets["trending"]?.error        // set only if that one rail failed
+```
+
+Up to 8 sets go in one request; larger calls are split. Pass `requestId` to
+make a retry idempotent: the same id never bills a set twice.
+
 ## API
 
 The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
@@ -124,6 +150,7 @@ The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
 | `patchItem(_:)` / `setItemActive(itemId:active:)` | Updates a single item via `/v1/items/{item_id}`. |
 | `deleteItems(_:)` | Deletes one or more items via `/v1/items/{item_id}`. |
 | `getRecommendations(_:)` | Gets personalized recommendations and captures returned `request_id`. |
+| `getRecommendationSets(_:)` | Gets every rail of a screen in one request (`/v1/recommendations/batch`); results keyed by set, each with its own `request_id`. |
 | `getAutoRecommendations(_:)` | Gets the next auto-generated recommendation section. |
 | `search(_:)` | Runs query-driven retrieval through `/v1/search` and captures returned `request_id`. Pass `resultItemIds` when your own engine ran the query. |
 | `trackSearch(userId:query:resultItemIds:)` | Records a search as an event that steers the user's recommendations. |
@@ -168,6 +195,13 @@ Network payload logging is disabled by default to avoid leaking sensitive data.
 ```bash
 swift test
 ```
+
+## Releasing
+
+Bump `VERSION` in a pull request. When it merges to `main`,
+`.github/workflows/tag-release.yml` runs the tests, tags `v<VERSION>` and
+publishes a GitHub release; Swift Package Manager resolves the new version
+from the tag.
 
 ## Related SDKs
 

@@ -260,6 +260,88 @@ final class NeuronSDKTests: XCTestCase {
     }
   }
 
+  func testRecommendationSetsAreOneBatchRequestKeyedBySet() async throws {
+    let http = MockHTTPDataLoader { request in
+      let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
+      let sets = body["requests"] as? [[String: Any]] ?? []
+      let results: [[String: Any]] = sets.map { set in
+        let key = set["key"] as? String ?? ""
+        let contextId = set["context_id"] as? Int ?? 0
+        if contextId == 999 {
+          return ["key": key, "status": 404, "request_id": "\(key)-id", "context_id": contextId,
+                  "error": ["code": "invalid_context", "message": "Context not found"]]
+        }
+        return ["key": key, "status": 200, "request_id": "\(key)-id", "context_id": contextId, "data": [["id": 1]]]
+      }
+      let payload: [String: Any] = [
+        "object": "recommendation_set_list",
+        "request_id": body["request_id"] ?? "",
+        "results": results,
+        "usage": ["sets": results.count, "computed": results.count, "reused": 0, "coalesced": 0],
+      ]
+      return (
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+        try JSONSerialization.data(withJSONObject: payload)
+      )
+    }
+    let sdk = try makeSDK(http: http)
+
+    let page = try await sdk.getRecommendationSets(
+      RecommendationSetsOptions(
+        userId: "u1",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        sets: [
+          RecommendationSetRequest(key: "for_you", contextId: 101, limit: 12),
+          RecommendationSetRequest(key: "similar", contextId: 102, limit: 4, itemId: 55, filters: ["type:van"]),
+          RecommendationSetRequest(key: "gone", contextId: 999),
+        ]
+      )
+    )
+
+    XCTAssertEqual(http.requests.count, 1)
+    let request = try XCTUnwrap(http.requests.first)
+    XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/recommendations/batch")
+    XCTAssertEqual(request.httpMethod, "POST")
+    XCTAssertEqual(request.value(forHTTPHeaderField: "X-Request-Id"), "11111111-1111-4111-8111-111111111111")
+    let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+    XCTAssertEqual(body["user_id"] as? String, "u1")
+    let sent = try XCTUnwrap(body["requests"] as? [[String: Any]])
+    XCTAssertEqual(sent[1]["item_id"] as? Int, 55)
+    XCTAssertEqual(sent[1]["filters"] as? [String], ["type:van"])
+
+    XCTAssertEqual(page.results.map(\.key), ["for_you", "similar", "gone"])
+    XCTAssertEqual(page.sets["similar"]?.requestId, "similar-id")
+    XCTAssertEqual(page.sets["for_you"]?.data.count, 1)
+    XCTAssertEqual(page.sets["gone"]?.isSuccess, false)
+    XCTAssertEqual(page.usage["sets"], .int(3))
+  }
+
+  func testRecommendationSetsSplitLargeCallsAndRejectBadSets() async throws {
+    let http = MockHTTPDataLoader { request in
+      (
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+        #"{"results":[]}"#.data(using: .utf8)!
+      )
+    }
+    let sdk = try makeSDK(http: http)
+    let sets = (0...NeuronSDK.maxRecommendationSetsPerBatch).map { RecommendationSetRequest(key: "rail_\($0)", contextId: $0 + 1) }
+    _ = try await sdk.getRecommendationSets(RecommendationSetsOptions(anonymousId: "anon", sets: sets))
+    XCTAssertEqual(http.requests.count, 2)
+
+    for invalid in [
+      [RecommendationSetRequest](),
+      [RecommendationSetRequest(key: "bad key", contextId: 1)],
+      [RecommendationSetRequest(key: "a", contextId: 1), RecommendationSetRequest(key: "a", contextId: 2)],
+      [RecommendationSetRequest(key: "a", contextId: 0)],
+    ] {
+      do {
+        _ = try await sdk.getRecommendationSets(RecommendationSetsOptions(userId: "u", sets: invalid))
+        XCTFail("Expected invalid sets to be rejected")
+      } catch {}
+    }
+    XCTAssertEqual(http.requests.count, 2)
+  }
+
   private func makeSDK(
     baseURL: String = "https://api.example.com/v1",
     http: MockHTTPDataLoader,

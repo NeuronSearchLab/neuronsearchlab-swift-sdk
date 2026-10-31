@@ -593,6 +593,129 @@ public struct RecommendationsResponse: Codable, Equatable, Sendable {
 
 public typealias SearchResponse = RecommendationsResponse
 
+/// One rail of a page, for `NeuronSDK.getRecommendationSets(_:)`.
+public struct RecommendationSetRequest: Sendable {
+  /// Your name for the set, unique within the call; results come back under it.
+  public var key: String
+  public var contextId: Int
+  public var limit: Int?
+  /// Seed item for a "more like this" rail.
+  public var itemId: Int?
+  public var cartItemIds: [Int]
+  public var pageType: String?
+  /// Filter shorthand, e.g. `category:shoes`.
+  public var filters: [String]
+  public var scope: JSONObject?
+  /// Turns this set into a search.
+  public var query: String?
+
+  public init(
+    key: String,
+    contextId: Int,
+    limit: Int? = nil,
+    itemId: Int? = nil,
+    cartItemIds: [Int] = [],
+    pageType: String? = nil,
+    filters: [String] = [],
+    scope: JSONObject? = nil,
+    query: String? = nil
+  ) {
+    self.key = key
+    self.contextId = contextId
+    self.limit = limit
+    self.itemId = itemId
+    self.cartItemIds = cartItemIds
+    self.pageType = pageType
+    self.filters = filters
+    self.scope = scope
+    self.query = query
+  }
+
+  func normalized() -> JSONValue {
+    var object: JSONObject = ["key": .string(key), "context_id": .int(contextId)]
+    if let limit = limit { object["limit"] = .int(limit) }
+    if let itemId = itemId { object["item_id"] = .int(itemId) }
+    if !cartItemIds.isEmpty { object["cart_item_ids"] = .array(cartItemIds.map(JSONValue.int)) }
+    if let pageType = normalizeOptionalString(pageType) { object["page_type"] = .string(pageType) }
+    if !filters.isEmpty { object["filters"] = .array(filters.map(JSONValue.string)) }
+    if let scope = scope { object["scope"] = .object(scope) }
+    if let query = normalizeOptionalString(query) { object["query"] = .string(query) }
+    return .object(object)
+  }
+}
+
+public struct RecommendationSetsOptions: Sendable {
+  /// At least one of userId or anonymousId identifies the visitor.
+  public var userId: NeuronID?
+  public var anonymousId: String?
+  public var sessionId: String?
+  /// Makes a retry idempotent: the same requestId bills each set once.
+  /// One is generated per call when nil.
+  public var requestId: String?
+  public var sets: [RecommendationSetRequest]
+
+  public init(
+    userId: NeuronID? = nil,
+    anonymousId: String? = nil,
+    sessionId: String? = nil,
+    requestId: String? = nil,
+    sets: [RecommendationSetRequest]
+  ) {
+    self.userId = userId
+    self.anonymousId = anonymousId
+    self.sessionId = sessionId
+    self.requestId = requestId
+    self.sets = sets
+  }
+}
+
+/// One set's result: a full recommendations response, or that set's own error.
+public struct RecommendationSetResult: Codable, Equatable, Sendable {
+  public var raw: JSONObject
+
+  public init(raw: JSONObject) {
+    self.raw = raw
+  }
+
+  public init(from decoder: Decoder) throws {
+    raw = try JSONObject(from: decoder)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    try raw.encode(to: encoder)
+  }
+
+  public var key: String { raw["key"]?.stringValue ?? "" }
+  public var status: Int? { raw["status"]?.intValue }
+  /// Attach this to events from this rail, not another set's.
+  public var requestId: String? { raw["request_id"]?.stringValue }
+  public var contextId: Int? { raw["context_id"]?.intValue }
+  /// Present only when this set failed.
+  public var error: JSONObject? { raw["error"]?.objectValue }
+  public var isSuccess: Bool { error == nil && (status ?? 200) < 400 }
+  /// The set read as an ordinary recommendations response.
+  public var response: RecommendationsResponse { RecommendationsResponse(raw: raw) }
+  public var data: [RecommendationResource] { response.data ?? [] }
+}
+
+public struct RecommendationSetsResponse: Equatable, Sendable {
+  public var requestId: String
+  /// In the order requested.
+  public var results: [RecommendationSetResult]
+  public var usage: JSONObject
+
+  public init(requestId: String, results: [RecommendationSetResult], usage: JSONObject) {
+    self.requestId = requestId
+    self.results = results
+    self.usage = usage
+  }
+
+  /// The same results keyed by `key`.
+  public var sets: [String: RecommendationSetResult] {
+    Dictionary(results.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+  }
+}
+
 public struct PatchItemResponse: Codable, Equatable, Sendable {
   public var raw: JSONObject
 
