@@ -342,6 +342,58 @@ final class NeuronSDKTests: XCTestCase {
     XCTAssertEqual(http.requests.count, 2)
   }
 
+  func testRecommendationSetsLoadAGroupById() async throws {
+    let http = MockHTTPDataLoader { request in
+      let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any] ?? [:]
+      let payload: [String: Any] = [
+        "group_id": body["group_id"] ?? 0,
+        "results": [
+          ["key": "for_you", "status": 200, "request_id": "a", "context_id": 2323, "data": []],
+          ["key": "similar", "status": 200, "request_id": "b", "context_id": 2324, "data": []],
+        ],
+      ]
+      return (
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+        try JSONSerialization.data(withJSONObject: payload)
+      )
+    }
+    let sdk = try makeSDK(http: http)
+
+    let page = try await sdk.getRecommendationSets(
+      RecommendationSetsOptions(
+        userId: "u1",
+        groupId: 12,
+        limit: 6,
+        sets: [RecommendationSetRequest(contextId: 2324, itemId: 3187)]
+      )
+    )
+
+    XCTAssertEqual(http.requests.count, 1)
+    let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(http.requests.first?.httpBody)) as? [String: Any])
+    XCTAssertEqual(body["group_id"] as? Int, 12)
+    XCTAssertEqual(body["limit"] as? Int, 6)
+    let sent = try XCTUnwrap(body["requests"] as? [[String: Any]])
+    XCTAssertNil(sent[0]["key"])
+    XCTAssertEqual(sent[0]["item_id"] as? Int, 3187)
+    XCTAssertEqual(page.groupId, 12)
+    XCTAssertEqual(page.results.map(\.key), ["for_you", "similar"])
+
+    _ = try await sdk.getRecommendationSets(RecommendationSetsOptions(userId: "u1", groupId: 12))
+    XCTAssertEqual(http.requests.count, 2)
+
+    for invalid in [
+      RecommendationSetsOptions(userId: "u", groupId: 0),
+      RecommendationSetsOptions(userId: "u", limit: 5, sets: [RecommendationSetRequest(key: "a", contextId: 1)]),
+      RecommendationSetsOptions(userId: "u", sets: [RecommendationSetRequest(contextId: 1)]),
+    ] {
+      do {
+        _ = try await sdk.getRecommendationSets(invalid)
+        XCTFail("Expected invalid group input to be rejected")
+      } catch {}
+    }
+    XCTAssertEqual(http.requests.count, 2)
+  }
+
   private func makeSDK(
     baseURL: String = "https://api.example.com/v1",
     http: MockHTTPDataLoader,

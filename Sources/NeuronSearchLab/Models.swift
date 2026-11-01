@@ -596,7 +596,9 @@ public typealias SearchResponse = RecommendationsResponse
 /// One rail of a page, for `NeuronSDK.getRecommendationSets(_:)`.
 public struct RecommendationSetRequest: Sendable {
   /// Your name for the set, unique within the call; results come back under it.
-  public var key: String
+  /// Nil only in a group request, for a set that adjusts one of the group's
+  /// rails: that rail keeps its default key, the context key.
+  public var key: String?
   public var contextId: Int
   public var limit: Int?
   /// Seed item for a "more like this" rail.
@@ -631,8 +633,31 @@ public struct RecommendationSetRequest: Sendable {
     self.query = query
   }
 
+  /// A set for one of a group's rails in a group request, adjusting it (its
+  /// item, filters or limit) without renaming it.
+  public init(
+    contextId: Int,
+    limit: Int? = nil,
+    itemId: Int? = nil,
+    cartItemIds: [Int] = [],
+    pageType: String? = nil,
+    filters: [String] = [],
+    scope: JSONObject? = nil
+  ) {
+    self.key = nil
+    self.contextId = contextId
+    self.limit = limit
+    self.itemId = itemId
+    self.cartItemIds = cartItemIds
+    self.pageType = pageType
+    self.filters = filters
+    self.scope = scope
+    self.query = nil
+  }
+
   func normalized() -> JSONValue {
-    var object: JSONObject = ["key": .string(key), "context_id": .int(contextId)]
+    var object: JSONObject = ["context_id": .int(contextId)]
+    if let key = key { object["key"] = .string(key) }
     if let limit = limit { object["limit"] = .int(limit) }
     if let itemId = itemId { object["item_id"] = .int(itemId) }
     if !cartItemIds.isEmpty { object["cart_item_ids"] = .array(cartItemIds.map(JSONValue.int)) }
@@ -652,6 +677,12 @@ public struct RecommendationSetsOptions: Sendable {
   /// Makes a retry idempotent: the same requestId bills each set once.
   /// One is generated per call when nil.
   public var requestId: String?
+  /// Serve every rail of a context group (Contexts page, "Load this group").
+  /// Each rail comes back under its context key, in the group's order, and the
+  /// group's rules apply. With a group, `sets` is optional.
+  public var groupId: Int?
+  /// Size of every rail in a group request (default 20).
+  public var limit: Int?
   public var sets: [RecommendationSetRequest]
 
   public init(
@@ -659,12 +690,16 @@ public struct RecommendationSetsOptions: Sendable {
     anonymousId: String? = nil,
     sessionId: String? = nil,
     requestId: String? = nil,
-    sets: [RecommendationSetRequest]
+    groupId: Int? = nil,
+    limit: Int? = nil,
+    sets: [RecommendationSetRequest] = []
   ) {
     self.userId = userId
     self.anonymousId = anonymousId
     self.sessionId = sessionId
     self.requestId = requestId
+    self.groupId = groupId
+    self.limit = limit
     self.sets = sets
   }
 }
@@ -700,12 +735,15 @@ public struct RecommendationSetResult: Codable, Equatable, Sendable {
 
 public struct RecommendationSetsResponse: Equatable, Sendable {
   public var requestId: String
+  /// Set for a group request.
+  public var groupId: Int?
   /// In the order requested.
   public var results: [RecommendationSetResult]
   public var usage: JSONObject
 
-  public init(requestId: String, results: [RecommendationSetResult], usage: JSONObject) {
+  public init(requestId: String, groupId: Int? = nil, results: [RecommendationSetResult], usage: JSONObject) {
     self.requestId = requestId
+    self.groupId = groupId
     self.results = results
     self.usage = usage
   }

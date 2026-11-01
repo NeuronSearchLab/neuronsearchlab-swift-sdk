@@ -298,19 +298,35 @@ public final class NeuronSDK: @unchecked Sendable {
   public func getRecommendationSets(
     _ options: RecommendationSetsOptions
   ) async throws -> RecommendationSetsResponse {
-    guard !options.sets.isEmpty else {
-      throw SDKClientError.validation("sets must be a non-empty array")
+    if let groupId = options.groupId, groupId <= 0 {
+      throw SDKClientError.validation("groupId must be a positive integer")
+    }
+    if options.limit != nil && options.groupId == nil {
+      throw SDKClientError.validation("limit applies to a group request; give each set its own limit")
+    }
+    guard !options.sets.isEmpty || options.groupId != nil else {
+      throw SDKClientError.validation("sets must be a non-empty array, or pass a groupId")
     }
     var keys = Set<String>()
     for set in options.sets {
-      guard set.key.range(of: #"^[A-Za-z0-9_.:-]{1,64}$"#, options: .regularExpression) != nil else {
-        throw SDKClientError.validation("Set key \"\(set.key)\" must match [A-Za-z0-9_.:-]{1,64}")
+      guard let key = set.key else {
+        // A group request may adjust one of the group's rails without naming it.
+        guard options.groupId != nil else {
+          throw SDKClientError.validation("Each set needs a key outside a group request")
+        }
+        guard set.contextId > 0 else {
+          throw SDKClientError.validation("A group rail adjustment needs a positive integer contextId")
+        }
+        continue
       }
-      guard keys.insert(set.key).inserted else {
-        throw SDKClientError.validation("Duplicate set key \"\(set.key)\"")
+      guard key.range(of: #"^[A-Za-z0-9_.:-]{1,64}$"#, options: .regularExpression) != nil else {
+        throw SDKClientError.validation("Set key \"\(key)\" must match [A-Za-z0-9_.:-]{1,64}")
+      }
+      guard keys.insert(key).inserted else {
+        throw SDKClientError.validation("Duplicate set key \"\(key)\"")
       }
       guard set.contextId > 0 else {
-        throw SDKClientError.validation("Set \"\(set.key)\": contextId must be a positive integer")
+        throw SDKClientError.validation("Set \"\(key)\": contextId must be a positive integer")
       }
     }
 
@@ -319,8 +335,14 @@ public final class NeuronSDK: @unchecked Sendable {
     var results: [RecommendationSetResult] = []
     var usage: [String: Int] = ["sets": 0, "computed": 0, "reused": 0, "coalesced": 0]
 
-    for (index, start) in stride(from: 0, to: options.sets.count, by: perBatch).enumerated() {
-      let chunk = options.sets[start..<min(start + perBatch, options.sets.count)]
+    // The server expands a group, so a group request cannot be split here.
+    let chunks: [ArraySlice<RecommendationSetRequest>] = options.groupId != nil
+      ? [options.sets[...]]
+      : stride(from: 0, to: options.sets.count, by: perBatch).map {
+          options.sets[$0..<min($0 + perBatch, options.sets.count)]
+        }
+
+    for (index, chunk) in chunks.enumerated() {
       // Each chunk is its own batch, so each needs its own idempotency key.
       let chunkRequestId = index == 0 ? requestId : UUID().uuidString.lowercased()
       var body: JSONObject = [
@@ -330,6 +352,8 @@ public final class NeuronSDK: @unchecked Sendable {
       if let userId = options.userId?.normalized { body["user_id"] = .string(userId) }
       if let anonymousId = normalizeOptionalString(options.anonymousId) { body["anonymous_id"] = .string(anonymousId) }
       if let sessionId = normalizeOptionalString(options.sessionId) { body["session_id"] = .string(sessionId) }
+      if let groupId = options.groupId { body["group_id"] = .int(groupId) }
+      if let limit = options.limit { body["limit"] = .int(limit) }
 
       let response: JSONValue = try await request(
         "/recommendations/batch",
@@ -348,6 +372,7 @@ public final class NeuronSDK: @unchecked Sendable {
 
     return RecommendationSetsResponse(
       requestId: requestId,
+      groupId: options.groupId,
       results: results,
       usage: usage.mapValues { JSONValue.int($0) }
     )
