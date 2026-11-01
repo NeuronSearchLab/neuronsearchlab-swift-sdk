@@ -138,6 +138,24 @@ page.sets["trending"]?.error        // set only if that one rail failed
 Up to 8 sets go in one request; larger calls are split. Pass `requestId` to
 make a retry idempotent: the same id never bills a set twice.
 
+#### Load a context group
+
+Group the rails on the Contexts page, then load them by the group's ID (shown
+next to the group's name). Each rail comes back under its context key, in the
+group's order, and the group's rules apply:
+
+```swift
+let page = try await sdk.getRecommendationSets(
+  RecommendationSetsOptions(
+    userId: "42",
+    groupId: 12,
+    limit: 12,
+    // Optional: adjust one rail, e.g. seed "similar items" with this product.
+    sets: [RecommendationSetRequest(contextId: 103, itemId: 5501)]
+  )
+)
+```
+
 ## API
 
 The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
