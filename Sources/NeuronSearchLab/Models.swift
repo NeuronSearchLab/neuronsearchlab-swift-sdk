@@ -74,6 +74,19 @@ public struct SDKConfig: Sendable {
   public var propagateRecommendationRequestId: Bool
   public var sessionId: String?
   public var autoSessionId: Bool
+  /// Inactivity after which an SDK-managed session id is replaced. Default
+  /// 30 minutes. A `sessionId` you set yourself is never rotated.
+  public var sessionTimeoutSeconds: TimeInterval
+  /// The visitor's anonymous id. When nil, the SDK generates a random one
+  /// and keeps it in `UserDefaults` while consent is granted.
+  public var anonymousId: String?
+  /// Whether the user has agreed to identifiers being stored on the device.
+  /// While false nothing is read from or written to `UserDefaults`; ids live
+  /// in memory only. Change it later with `NeuronSDK.setConsent(_:)`.
+  public var consentGranted: Bool
+  /// The `UserDefaults` suite the anonymous id is kept in, e.g. an App Group.
+  /// Nil uses `UserDefaults.standard`.
+  public var userDefaultsSuiteName: String?
 
   public init(
     baseURL: String,
@@ -88,7 +101,11 @@ public struct SDKConfig: Sendable {
     disableArrayBatching: Bool = false,
     propagateRecommendationRequestId: Bool = true,
     sessionId: String? = nil,
-    autoSessionId: Bool = true
+    autoSessionId: Bool = true,
+    sessionTimeoutSeconds: TimeInterval = 30 * 60,
+    anonymousId: String? = nil,
+    consentGranted: Bool = true,
+    userDefaultsSuiteName: String? = nil
   ) {
     self.baseURL = baseURL
     self.accessToken = accessToken
@@ -103,12 +120,19 @@ public struct SDKConfig: Sendable {
     self.propagateRecommendationRequestId = propagateRecommendationRequestId
     self.sessionId = sessionId
     self.autoSessionId = autoSessionId
+    self.sessionTimeoutSeconds = sessionTimeoutSeconds
+    self.anonymousId = anonymousId
+    self.consentGranted = consentGranted
+    self.userDefaultsSuiteName = userDefaultsSuiteName
   }
 }
 
 public struct TrackEventPayload: Sendable {
   public var eventId: Int?
+  /// Defaults to the user set by `identify(_:)`, else the anonymous id.
   public var userId: NeuronID?
+  /// Defaults to the SDK's anonymous id.
+  public var anonymousId: String?
   public var itemId: Int?
   public var contextId: Int?
   public var occurredAt: Int?
@@ -127,6 +151,7 @@ public struct TrackEventPayload: Sendable {
   public init(
     eventId: Int? = nil,
     userId: NeuronID? = nil,
+    anonymousId: String? = nil,
     itemId: Int? = nil,
     contextId: Int? = nil,
     occurredAt: Int? = nil,
@@ -139,6 +164,7 @@ public struct TrackEventPayload: Sendable {
   ) {
     self.eventId = eventId
     self.userId = userId
+    self.anonymousId = anonymousId
     self.itemId = itemId
     self.contextId = contextId
     self.occurredAt = occurredAt
@@ -150,25 +176,19 @@ public struct TrackEventPayload: Sendable {
     self.additionalFields = additionalFields
   }
 
-  func normalized(now: Date = Date()) throws -> JSONObject {
-    let userIdValue = userId?.normalized
+  /// `userId` and `anonymousId` are the resolved identity the SDK sends
+  /// (see `NeuronSDK.resolveIdentity`).
+  func normalized(userId userIdValue: String, anonymousId anonymousIdValue: String, now: Date = Date()) throws -> JSONObject {
     let queryValue = normalizeOptionalString(query)
     let isSearch = itemId == nil && queryValue != nil
 
-    guard let userIdValue else {
-      throw SDKClientError.validation(
-        isSearch
-          ? "userId is required"
-          : "eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)"
-      )
-    }
     if isSearch {
       if let eventId, eventId == 0 {
         throw SDKClientError.validation("eventId must be a non-zero integer when provided")
       }
     } else {
       guard let itemId, itemId > 0, let eventId, eventId != 0 else {
-        throw SDKClientError.validation("eventId must be a non-zero integer, itemId must be a positive integer, and userId is required (or send query without itemId for a search event)")
+        throw SDKClientError.validation("eventId must be a non-zero integer and itemId must be a positive integer (or send query without itemId for a search event)")
       }
     }
     if let resultItemIds {
@@ -193,6 +213,9 @@ public struct TrackEventPayload: Sendable {
     }
 
     payload["user_id"] = .string(userIdValue)
+    if normalizeOptionalString(anonymousId) != nil || payload["anonymous_id"] == nil {
+      payload["anonymous_id"] = .string(anonymousIdValue)
+    }
     if let itemId { payload["item_id"] = .int(itemId) }
     if let eventId { payload["event_id"] = .int(eventId) }
     if let queryValue { payload["query"] = .string(queryValue) }
@@ -282,14 +305,15 @@ public struct DeleteItemInput: Sendable {
 }
 
 public struct RecommendationOptions: Sendable {
-  public var userId: NeuronID
+  /// Defaults to the user set by `identify(_:)`, else the anonymous id.
+  public var userId: NeuronID?
   public var contextId: Int?
   public var scope: JSONObject?
   public var limit: Int?
   public var startingAfter: String?
 
   public init(
-    userId: NeuronID,
+    userId: NeuronID? = nil,
     contextId: Int? = nil,
     scope: JSONObject? = nil,
     limit: Int? = nil,
@@ -304,7 +328,8 @@ public struct RecommendationOptions: Sendable {
 }
 
 public struct AutoRecommendationsOptions: Sendable {
-  public var userId: NeuronID
+  /// Defaults to the user set by `identify(_:)`, else the anonymous id.
+  public var userId: NeuronID?
   public var contextId: Int?
   public var scope: JSONObject?
   public var limit: Int?
@@ -314,7 +339,7 @@ public struct AutoRecommendationsOptions: Sendable {
   public var servedCap: Int?
 
   public init(
-    userId: NeuronID,
+    userId: NeuronID? = nil,
     contextId: Int? = nil,
     scope: JSONObject? = nil,
     limit: Int? = nil,
@@ -645,8 +670,9 @@ public struct RecommendationSetRequest: Sendable {
 }
 
 public struct RecommendationSetsOptions: Sendable {
-  /// At least one of userId or anonymousId identifies the visitor.
+  /// Defaults to the user set by `identify(_:)`, else the anonymous id.
   public var userId: NeuronID?
+  /// Defaults to the SDK's anonymous id.
   public var anonymousId: String?
   public var sessionId: String?
   /// Makes a retry idempotent: the same requestId bills each set once.
@@ -713,6 +739,35 @@ public struct RecommendationSetsResponse: Equatable, Sendable {
   /// The same results keyed by `key`.
   public var sets: [String: RecommendationSetResult] {
     Dictionary(results.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+  }
+}
+
+/// The result of `NeuronSDK.identify(_:)` (`POST /v1/identify`).
+public struct IdentifyResult: Codable, Equatable, Sendable {
+  /// Whether the anonymous id is now linked to the user.
+  public var linked: Bool
+  /// How many of the anonymous id's past events moved onto the user.
+  public var eventsMoved: Int
+  /// Why nothing was linked, e.g. `already_identified`.
+  public var reason: String?
+
+  public init(linked: Bool, eventsMoved: Int, reason: String? = nil) {
+    self.linked = linked
+    self.eventsMoved = eventsMoved
+    self.reason = reason
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case linked
+    case eventsMoved = "events_moved"
+    case reason
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    linked = (try? container.decodeIfPresent(Bool.self, forKey: .linked)) ?? false
+    eventsMoved = (try? container.decodeIfPresent(Int.self, forKey: .eventsMoved)) ?? 0
+    reason = try? container.decodeIfPresent(String.self, forKey: .reason)
   }
 }
 
