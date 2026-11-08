@@ -39,6 +39,13 @@ public struct SDKTimeoutError: Error, LocalizedError, Sendable {
 public final class NeuronSDK: @unchecked Sendable {
   /// The most recommendation sets the API serves in one batch; larger calls are split.
   public static let maxRecommendationSetsPerBatch = 8
+  /// The `UserDefaults` key the anonymous id is kept under while consent is granted.
+  public static let anonymousIdStorageKey = "com.neuronsearchlab.anonymous_id"
+  /// Sent as `source` on `POST /v1/identify`.
+  static let identifySource = "swift-sdk"
+  static let defaultSessionTimeoutSeconds: TimeInterval = 30 * 60
+  /// Sent as `client` on every event, so the console can show the source.
+  public static let client = "swift-sdk/\(version)"
 
   private struct BufferedEvent {
     let payload: JSONObject
@@ -66,8 +73,25 @@ public final class NeuronSDK: @unchecked Sendable {
   private var lastRecommendationRequestId: String?
   private var autoSessionId: Bool
   private var currentSessionId: String?
+  /// True while the session id is the SDK's own, which rotates after inactivity.
+  private var sessionManaged = false
+  private var lastActivityAt: Date
+  private let sessionTimeoutSeconds: TimeInterval
+  private let clock: @Sendable () -> Date
+  private let defaults: UserDefaults?
+  private var consentGranted: Bool
+  private var anonymousId: String
+  /// True when the SDK generated the anonymous id (so it may persist it);
+  /// false for one passed in `SDKConfig.anonymousId`.
+  private var anonymousIdManaged: Bool
+  private var currentUserId: String?
+  private let platform: EventPlatform
 
-  public init(_ config: SDKConfig) throws {
+  public convenience init(_ config: SDKConfig) throws {
+    try self.init(config, clock: { Date() })
+  }
+
+  init(_ config: SDKConfig, clock: @escaping @Sendable () -> Date) throws {
     guard !config.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       throw SDKClientError.validation("baseURL and accessToken are required")
     }
@@ -85,9 +109,50 @@ public final class NeuronSDK: @unchecked Sendable {
     propagateRecommendationRequestId = config.propagateRecommendationRequestId
     autoSessionId = config.autoSessionId
     currentSessionId = normalizeOptionalString(config.sessionId)
+    self.clock = clock
+    platform = normalizeOptionalString(config.platform.rawValue).map(EventPlatform.init(rawValue:)) ?? .ios
+    lastActivityAt = clock()
+    sessionTimeoutSeconds = config.sessionTimeoutSeconds > 0
+      ? config.sessionTimeoutSeconds
+      : Self.defaultSessionTimeoutSeconds
+
+    let store: UserDefaults?
+    if let suiteName = normalizeOptionalString(config.userDefaultsSuiteName) {
+      store = UserDefaults(suiteName: suiteName)
+      if store == nil {
+        logger.warn(
+          "UserDefaults suite unavailable; keeping the anonymous id in memory",
+          context: ["suiteName": .string(suiteName)]
+        )
+      }
+    } else {
+      store = UserDefaults.standard
+    }
+    defaults = store
+
+    consentGranted = config.consentGranted
+    let key = Self.anonymousIdStorageKey
+    if let configured = normalizeOptionalString(config.anonymousId) {
+      anonymousId = configured
+      anonymousIdManaged = false
+    } else if config.consentGranted,
+              let stored = normalizeOptionalString(store?.string(forKey: key)) {
+      anonymousId = stored
+      anonymousIdManaged = true
+    } else {
+      anonymousId = Self.newIdentifier()
+      anonymousIdManaged = true
+    }
+
+    if config.consentGranted {
+      persistAnonymousIdLocked()
+    } else {
+      // Consent withheld: nothing from an earlier grant stays on the device.
+      store?.removeObject(forKey: key)
+    }
 
     if autoSessionId && currentSessionId == nil {
-      currentSessionId = UUID().uuidString
+      startManagedSessionLocked()
     }
   }
 
@@ -126,18 +191,128 @@ public final class NeuronSDK: @unchecked Sendable {
     }
   }
 
+  /// Set your own session id, which the SDK then never rotates. Pass nil to
+  /// hand sessions back to the SDK (a fresh one when `autoSessionId` is on).
   public func setSessionId(_ sessionId: String?) {
     stateQueue.sync {
-      currentSessionId = normalizeOptionalString(sessionId)
-      if autoSessionId && currentSessionId == nil {
-        currentSessionId = UUID().uuidString
+      if let sessionId = normalizeOptionalString(sessionId) {
+        currentSessionId = sessionId
+        sessionManaged = false
+      } else if autoSessionId {
+        startManagedSessionLocked()
+      } else {
+        currentSessionId = nil
+        sessionManaged = false
       }
     }
   }
 
+  /// The session id the next event will carry. An SDK-managed session idle
+  /// for `sessionTimeoutSeconds` is replaced first.
   public func getSessionId() -> String? {
     stateQueue.sync {
-      currentSessionId
+      sessionIdLocked(recordActivity: false)
+    }
+  }
+
+  /// The random install id events and recommendations fall back to as
+  /// `user_id` until `identify(_:)` is called. Not an advertising id.
+  public func getAnonymousId() -> String {
+    stateQueue.sync {
+      anonymousId
+    }
+  }
+
+  /// The user set by `identify(_:)`, or nil while the visitor is anonymous.
+  public func getUserId() -> String? {
+    stateQueue.sync {
+      currentUserId
+    }
+  }
+
+  /// Tie this device's anonymous visitor to a known user, e.g. after login.
+  /// `POST /v1/identify`
+  ///
+  /// The API moves the anonymous id's past events onto the user, so their
+  /// profile follows them across web and app; sessions stay per device.
+  /// Later events and recommendations default to this user. Identifying the
+  /// current user again makes no request. If the request fails the SDK stays
+  /// anonymous, so calling it again still links.
+  @discardableResult
+  public func identify(_ userId: NeuronID) async throws -> IdentifyResult {
+    guard let user = userId.normalized else {
+      throw SDKClientError.validation("userId must be a non-empty string or number")
+    }
+    let anonymous = stateQueue.sync { () -> String? in
+      currentUserId == user ? nil : anonymousId
+    }
+    guard let anonymous else {
+      return IdentifyResult(linked: false, eventsMoved: 0, reason: "already_identified")
+    }
+
+    // Send what was tracked anonymously first, so the move covers it.
+    await flushEvents()
+
+    let result: IdentifyResult = try await request(
+      "/identify",
+      method: "POST",
+      body: .object([
+        "anonymous_id": .string(anonymous),
+        "user_id": .string(user),
+        "source": .string(Self.identifySource),
+      ])
+    )
+    stateQueue.sync {
+      // A reset() while the request was in flight wins.
+      if anonymousId == anonymous {
+        currentUserId = user
+      }
+    }
+    return result
+  }
+
+  /// Forget the current visitor, e.g. on logout: a new anonymous id
+  /// (persisted while consent is granted), a new session id, no identified
+  /// user and no remembered recommendation request id. Events already
+  /// buffered keep the ids they were tracked with.
+  public func reset() {
+    stateQueue.sync {
+      currentUserId = nil
+      lastRecommendationRequestId = nil
+      anonymousId = Self.newIdentifier()
+      anonymousIdManaged = true
+      persistAnonymousIdLocked()
+      if autoSessionId {
+        startManagedSessionLocked()
+      } else {
+        currentSessionId = nil
+        sessionManaged = false
+      }
+    }
+  }
+
+  /// Grant or withdraw consent to store identifiers on the device.
+  ///
+  /// Granting stores the current anonymous id in `UserDefaults`. Withdrawing
+  /// removes it and replaces the anonymous id and SDK-managed session id with
+  /// fresh in-memory ones, so nothing from before links to what comes after.
+  public func setConsent(_ granted: Bool) {
+    stateQueue.sync {
+      let wasGranted = consentGranted
+      consentGranted = granted
+      if granted {
+        persistAnonymousIdLocked()
+        return
+      }
+
+      defaults?.removeObject(forKey: Self.anonymousIdStorageKey)
+      if wasGranted {
+        anonymousId = Self.newIdentifier()
+        anonymousIdManaged = true
+        if sessionManaged {
+          startManagedSessionLocked()
+        }
+      }
     }
   }
 
@@ -154,6 +329,44 @@ public final class NeuronSDK: @unchecked Sendable {
     contextId: Int? = nil,
     sessionId: String? = nil
   ) async throws -> JSONValue {
+    try await recordSearch(
+      userId: userId,
+      query: query,
+      resultItemIds: resultItemIds,
+      eventId: eventId,
+      contextId: contextId,
+      sessionId: sessionId
+    )
+  }
+
+  /// `trackSearch(userId:query:...)` for the current visitor: the user set by
+  /// `identify(_:)`, else the anonymous id.
+  @discardableResult
+  public func trackSearch(
+    query: String,
+    resultItemIds: [Int]? = nil,
+    eventId: Int? = nil,
+    contextId: Int? = nil,
+    sessionId: String? = nil
+  ) async throws -> JSONValue {
+    try await recordSearch(
+      userId: nil,
+      query: query,
+      resultItemIds: resultItemIds,
+      eventId: eventId,
+      contextId: contextId,
+      sessionId: sessionId
+    )
+  }
+
+  private func recordSearch(
+    userId: NeuronID?,
+    query: String,
+    resultItemIds: [Int]?,
+    eventId: Int?,
+    contextId: Int?,
+    sessionId: String?
+  ) async throws -> JSONValue {
     guard normalizeOptionalString(query) != nil else {
       throw SDKClientError.validation("query is required")
     }
@@ -167,10 +380,20 @@ public final class NeuronSDK: @unchecked Sendable {
     ))
   }
 
+  /// Buffer an event for `/v1/events`. `userId` defaults to the user set by
+  /// `identify(_:)`, else the anonymous id; `anonymous_id` is always sent.
   @discardableResult
   public func trackEvent(_ data: TrackEventPayload) async throws -> JSONValue {
-    var payload = try data.normalized()
+    let identity = try resolveIdentity(userId: data.userId, anonymousId: data.anonymousId)
+    var payload = try data.normalized(userId: identity.userId, anonymousId: identity.anonymousId)
     payload["client_ts"] = .string(iso8601String())
+    // In the body, not headers, like the JS SDK.
+    payload["platform"] = .string(
+      normalizeOptionalString(data.platform?.rawValue)
+        ?? normalizeOptionalString(payload["platform"]?.stringValue)
+        ?? platform.rawValue
+    )
+    payload["client"] = .string(Self.client)
 
     stateQueue.sync {
       if payload["request_id"] == nil,
@@ -179,13 +402,9 @@ public final class NeuronSDK: @unchecked Sendable {
         payload["request_id"] = .string(lastRecommendationRequestId)
       }
 
-      if payload["session_id"] == nil {
-        if autoSessionId && currentSessionId == nil {
-          currentSessionId = UUID().uuidString
-        }
-        if let currentSessionId {
-          payload["session_id"] = .string(currentSessionId)
-        }
+      if payload["session_id"] == nil,
+         let sessionId = sessionIdLocked(recordActivity: true) {
+        payload["session_id"] = .string(sessionId)
       }
     }
 
@@ -265,9 +484,7 @@ public final class NeuronSDK: @unchecked Sendable {
   }
 
   public func getRecommendations(_ options: RecommendationOptions) async throws -> RecommendationsResponse {
-    guard let userId = options.userId.normalized else {
-      throw SDKClientError.validation("userId must be a string or number")
-    }
+    let identity = try resolveIdentity(userId: options.userId)
     if let contextId = options.contextId, contextId <= 0 {
       throw SDKClientError.validation("contextId must be a positive integer")
     }
@@ -277,7 +494,8 @@ public final class NeuronSDK: @unchecked Sendable {
       "/recommendations",
       method: "GET",
       queryItems: [
-        URLQueryItem(name: "user_id", value: userId),
+        URLQueryItem(name: "user_id", value: identity.userId),
+        URLQueryItem(name: "anonymous_id", value: identity.anonymousId),
         URLQueryItem(name: "context_id", value: options.contextId.map(String.init)),
         URLQueryItem(name: "scope", value: scope),
         URLQueryItem(name: "limit", value: options.limit.map(String.init)),
@@ -314,6 +532,7 @@ public final class NeuronSDK: @unchecked Sendable {
       }
     }
 
+    let identity = try resolveIdentity(userId: options.userId, anonymousId: options.anonymousId)
     let requestId = normalizeOptionalString(options.requestId) ?? UUID().uuidString.lowercased()
     let perBatch = NeuronSDK.maxRecommendationSetsPerBatch
     var results: [RecommendationSetResult] = []
@@ -325,10 +544,10 @@ public final class NeuronSDK: @unchecked Sendable {
       let chunkRequestId = index == 0 ? requestId : UUID().uuidString.lowercased()
       var body: JSONObject = [
         "request_id": .string(chunkRequestId),
+        "user_id": .string(identity.userId),
+        "anonymous_id": .string(identity.anonymousId),
         "requests": .array(chunk.map { $0.normalized() }),
       ]
-      if let userId = options.userId?.normalized { body["user_id"] = .string(userId) }
-      if let anonymousId = normalizeOptionalString(options.anonymousId) { body["anonymous_id"] = .string(anonymousId) }
       if let sessionId = normalizeOptionalString(options.sessionId) { body["session_id"] = .string(sessionId) }
 
       let response: JSONValue = try await request(
@@ -356,9 +575,7 @@ public final class NeuronSDK: @unchecked Sendable {
   public func getAutoRecommendations(
     _ options: AutoRecommendationsOptions
   ) async throws -> RecommendationsResponse {
-    guard let userId = options.userId.normalized else {
-      throw SDKClientError.validation("userId must be a string or number")
-    }
+    let identity = try resolveIdentity(userId: options.userId)
     if let contextId = options.contextId, contextId <= 0 {
       throw SDKClientError.validation("contextId must be a positive integer")
     }
@@ -369,7 +586,8 @@ public final class NeuronSDK: @unchecked Sendable {
       method: "GET",
       queryItems: [
         URLQueryItem(name: "mode", value: "auto"),
-        URLQueryItem(name: "user_id", value: userId),
+        URLQueryItem(name: "user_id", value: identity.userId),
+        URLQueryItem(name: "anonymous_id", value: identity.anonymousId),
         URLQueryItem(name: "context_id", value: options.contextId.map(String.init)),
         URLQueryItem(name: "scope", value: scope),
         URLQueryItem(name: "limit", value: options.limit.map(String.init)),
@@ -395,6 +613,60 @@ public final class NeuronSDK: @unchecked Sendable {
 
   public func flushEvents() async {
     await flushEvents(cancelScheduledTask: true)
+  }
+
+  /// The ids a call sends. `user_id` is the caller's, else (when the caller
+  /// names another visitor's anonymous id) that id, else the identified user,
+  /// else this device's anonymous id.
+  private func resolveIdentity(
+    userId: NeuronID?,
+    anonymousId explicitAnonymousId: String? = nil
+  ) throws -> (userId: String, anonymousId: String) {
+    if let userId, userId.normalized == nil {
+      throw SDKClientError.validation("userId must be a non-empty string or number when provided")
+    }
+    let explicitAnonymousId = normalizeOptionalString(explicitAnonymousId)
+    return stateQueue.sync { () -> (userId: String, anonymousId: String) in
+      let anonymous = explicitAnonymousId ?? anonymousId
+      let user = userId?.normalized ?? explicitAnonymousId ?? currentUserId ?? anonymousId
+      return (user, anonymous)
+    }
+  }
+
+  /// Call on `stateQueue`. Replaces an SDK-managed session idle past the
+  /// timeout; `recordActivity` marks the session as used now.
+  private func sessionIdLocked(recordActivity: Bool) -> String? {
+    guard sessionManaged else {
+      return currentSessionId
+    }
+    let now = clock()
+    if currentSessionId == nil || now.timeIntervalSince(lastActivityAt) >= sessionTimeoutSeconds {
+      startManagedSessionLocked(now: now)
+    }
+    if recordActivity {
+      lastActivityAt = now
+    }
+    return currentSessionId
+  }
+
+  /// Call on `stateQueue` (or from init).
+  private func startManagedSessionLocked(now: Date? = nil) {
+    sessionManaged = true
+    currentSessionId = Self.newIdentifier()
+    lastActivityAt = now ?? clock()
+  }
+
+  /// Call on `stateQueue` (or from init). Writes only an SDK-generated id,
+  /// and only while consent is granted.
+  private func persistAnonymousIdLocked() {
+    guard consentGranted, anonymousIdManaged else {
+      return
+    }
+    defaults?.set(anonymousId, forKey: Self.anonymousIdStorageKey)
+  }
+
+  private static func newIdentifier() -> String {
+    UUID().uuidString.lowercased()
   }
 
   private func flushEvents(cancelScheduledTask: Bool) async {

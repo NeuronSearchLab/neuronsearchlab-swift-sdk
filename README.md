@@ -112,6 +112,78 @@ let results = try await sdk.search(
 )
 ```
 
+## Visitor identity
+
+The SDK identifies a visitor the same way on web, iOS and your backend: an
+anonymous id for the install, a session id, and your user id once they log in.
+
+```swift
+// Before login: events and recommendations use the anonymous id as user_id.
+try await sdk.trackEvent(TrackEventPayload(eventId: 42, itemId: itemId))
+let recs = try await sdk.getRecommendations(RecommendationOptions(contextId: 101))
+
+// After login (and on launch when a user is already signed in):
+try await sdk.identify(user.id)
+
+// On logout:
+sdk.reset()
+```
+
+Lifecycle:
+
+- **Anonymous id.** A random UUID generated on first use and kept in
+  `UserDefaults` under `com.neuronsearchlab.anonymous_id` (or the
+  `userDefaultsSuiteName` you pass, e.g. an App Group), so it survives
+  relaunches. Pass `SDKConfig(anonymousId:)` to use your own instead.
+  `getAnonymousId()` returns it. Every event and recommendation request sends
+  it as `anonymous_id`.
+- **User id.** `userId` is optional everywhere. When you leave it out it
+  defaults to the user set by `identify(_:)`, else the anonymous id. A
+  `userId` you pass always wins.
+- **`identify(_:)`** sends `POST /v1/identify` with the anonymous id and your
+  user id, after flushing buffered events. The API moves the anonymous id's
+  past events onto the user, so their profile follows them across web and
+  app. It returns `IdentifyResult` (`linked`, `eventsMoved`, `reason`).
+  Identifying the same user again makes no request; if the request fails the
+  SDK stays anonymous, so calling it again still links.
+- **`reset()`** is for logout: a new anonymous id, a new session id, and no
+  identified user.
+- **Sessions** stay per device. The SDK-managed session id is replaced after
+  30 minutes without an event (`sessionTimeoutSeconds`). A session id you set
+  yourself (`SDKConfig(sessionId:)` or `setSessionId(_:)`) is never rotated.
+
+### Where events come from
+
+Every event carries `platform` (default `"ios"`; set `SDKConfig(platform:)`
+on a macOS, visionOS or server host, or per event with
+`TrackEventPayload(platform:)`) and `client` (`"swift-sdk/<version>"`). The
+console shows both.
+
+### Consent
+
+Under UK and EU device-storage rules you may need consent before storing an
+identifier on the device. Pass `consentGranted: false` until you have it:
+nothing is then read from or written to `UserDefaults`, and the ids live in
+memory for that launch only.
+
+```swift
+let sdk = try NeuronSDK(SDKConfig(baseURL: url, accessToken: token, consentGranted: false))
+
+sdk.setConsent(true)   // stores the current anonymous id
+sdk.setConsent(false)  // removes it and starts fresh ids, unlinked from before
+```
+
+### Not an advertising identifier
+
+The anonymous id is a random install id that the SDK creates itself. It is not
+the IDFA or any other advertising identifier, it is not shared with other apps
+or companies, and it resets when the app is deleted or `reset()` is called.
+When you use it only for your own app's recommendations, it is not tracking
+in Apple's sense, so App Tracking Transparency does not apply and no ATT
+prompt is needed. Declare it in your App Store privacy details as an
+identifier used for app functionality or product personalisation, not
+tracking.
+
 ### Several rails on one screen
 
 A screen with several recommendation rails should fetch them together. One
@@ -153,7 +225,11 @@ The Swift SDK exposes the native equivalents of the JavaScript SDK methods:
 | `getRecommendationSets(_:)` | Gets every rail of a screen in one request (`/v1/recommendations/batch`); results keyed by set, each with its own `request_id`. |
 | `getAutoRecommendations(_:)` | Gets the next auto-generated recommendation section. |
 | `search(_:)` | Runs query-driven retrieval through `/v1/search` and captures returned `request_id`. Pass `resultItemIds` when your own engine ran the query. |
-| `trackSearch(userId:query:resultItemIds:)` | Records a search as an event that steers the user's recommendations. |
+| `trackSearch(userId:query:resultItemIds:)` / `trackSearch(query:resultItemIds:)` | Records a search as an event that steers the user's recommendations. |
+| `identify(_:)` | Links the anonymous id to a user via `/v1/identify`; later calls default to that user. |
+| `reset()` | Starts a new anonymous visitor and session, e.g. on logout. |
+| `setConsent(_:)` | Grants or withdraws consent to store the anonymous id on the device. |
+| `getAnonymousId()` / `getUserId()` / `getSessionId()` | The ids the next call will send. |
 
 ### Searches steer recommendations
 
@@ -198,7 +274,9 @@ swift test
 
 ## Releasing
 
-Bump `VERSION` in a pull request. When it merges to `main`,
+Bump `VERSION` and run `scripts/sync-version.sh` (it regenerates
+`Sources/NeuronSearchLab/SDKVersion.swift`, which the `client` tag reads; a
+test fails while the two disagree) in a pull request. When it merges to `main`,
 `.github/workflows/tag-release.yml` runs the tests, tags `v<VERSION>` and
 publishes a GitHub release; Swift Package Manager resolves the new version
 from the tag.
