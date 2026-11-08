@@ -69,7 +69,10 @@ final class IdentityTests: XCTestCase {
     XCTAssertEqual(query["anonymous_id"], anonymousId)
 
     let result = try await sdk.identify("user-9")
-    XCTAssertEqual(result, IdentifyResult(linked: true, eventsMoved: 3, reason: nil))
+    XCTAssertEqual(
+      result,
+      IdentifyResult(linked: true, eventsMoved: 3, reason: nil, embeddingRefresh: .object(["queued": .bool(true)]))
+    )
     XCTAssertEqual(sdk.getUserId(), "user-9")
     let identify = http.requests[2]
     XCTAssertEqual(identify.httpMethod, "POST")
@@ -238,7 +241,55 @@ final class IdentityTests: XCTestCase {
     XCTAssertNotEqual(sdk.getSessionId(), managed)
   }
 
+  // MARK: Platform and client tags
+
+  func testEveryEventSaysWhereItCameFrom() async throws {
+    let http = routedLoader()
+    let sdk = try makeSDK(http: http)
+
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, itemId: 1))
+    try await sdk.trackSearch(query: "vans")
+    let expectedClient = "swift-sdk/" + (try versionFile())
+    for request in http.requests {
+      let event = try body(request)
+      XCTAssertEqual(event["platform"] as? String, "ios")
+      XCTAssertEqual(event["client"] as? String, expectedClient)
+    }
+
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, itemId: 1, platform: .server))
+    XCTAssertEqual(try body(http.requests[2])["platform"] as? String, "server")
+
+    // Recommendation calls are not events and carry no tags.
+    _ = try await sdk.getRecommendations(RecommendationOptions(contextId: 101))
+    XCTAssertNil(queryItems(http.requests[3])["platform"])
+  }
+
+  func testConfiguredPlatformAppliesToEveryEvent() async throws {
+    let http = routedLoader()
+    let sdk = try makeSDK(http: http, platform: "web")
+
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, itemId: 1))
+    try await sdk.trackEvent(TrackEventPayload(eventId: 42, itemId: 1, additionalFields: ["client": "spoofed"]))
+    XCTAssertEqual(try body(http.requests[0])["platform"] as? String, "web")
+    XCTAssertEqual(try body(http.requests[1])["client"] as? String, NeuronSDK.client)
+    XCTAssertEqual(EventPlatform.magento.rawValue, "magento")
+  }
+
+  func testVersionConstantMatchesVersionFile() throws {
+    XCTAssertEqual(NeuronSDK.version, try versionFile(), "run scripts/sync-version.sh after bumping VERSION")
+    XCTAssertEqual(NeuronSDK.client, "swift-sdk/\(NeuronSDK.version)")
+  }
+
   // MARK: Helpers
+
+  private func versionFile() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    return try String(contentsOf: root.appendingPathComponent("VERSION"), encoding: .utf8)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
 
   private func makeSDK(
     http: MockHTTPDataLoader? = nil,
@@ -246,6 +297,7 @@ final class IdentityTests: XCTestCase {
     anonymousId: String? = nil,
     consentGranted: Bool = true,
     sessionId: String? = nil,
+    platform: EventPlatform = .ios,
     clock: TestClock = TestClock()
   ) throws -> NeuronSDK {
     try NeuronSDK(
@@ -258,7 +310,8 @@ final class IdentityTests: XCTestCase {
         sessionId: sessionId,
         anonymousId: anonymousId,
         consentGranted: consentGranted,
-        userDefaultsSuiteName: suiteName
+        userDefaultsSuiteName: suiteName,
+        platform: platform
       ),
       clock: { clock.now }
     )
@@ -269,7 +322,7 @@ final class IdentityTests: XCTestCase {
       let path = request.url?.path ?? ""
       let json: String
       if path.hasSuffix("/identify") {
-        json = #"{"linked":true,"events_moved":3,"reason":null}"#
+        json = #"{"object":"identify","linked":true,"events_moved":3,"reason":null,"embedding_refresh":{"queued":true}}"#
       } else if path.hasSuffix("/recommendations/batch") {
         json = #"{"results":[]}"#
       } else if path.hasSuffix("/recommendations") {

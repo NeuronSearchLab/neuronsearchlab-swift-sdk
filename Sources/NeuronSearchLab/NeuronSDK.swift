@@ -44,6 +44,8 @@ public final class NeuronSDK: @unchecked Sendable {
   /// Sent as `source` on `POST /v1/identify`.
   static let identifySource = "swift-sdk"
   static let defaultSessionTimeoutSeconds: TimeInterval = 30 * 60
+  /// Sent as `client` on every event, so the console can show the source.
+  public static let client = "swift-sdk/\(version)"
 
   private struct BufferedEvent {
     let payload: JSONObject
@@ -83,6 +85,7 @@ public final class NeuronSDK: @unchecked Sendable {
   /// false for one passed in `SDKConfig.anonymousId`.
   private var anonymousIdManaged: Bool
   private var currentUserId: String?
+  private let platform: EventPlatform
 
   public convenience init(_ config: SDKConfig) throws {
     try self.init(config, clock: { Date() })
@@ -107,6 +110,7 @@ public final class NeuronSDK: @unchecked Sendable {
     autoSessionId = config.autoSessionId
     currentSessionId = normalizeOptionalString(config.sessionId)
     self.clock = clock
+    platform = normalizeOptionalString(config.platform.rawValue).map(EventPlatform.init(rawValue:)) ?? .ios
     lastActivityAt = clock()
     sessionTimeoutSeconds = config.sessionTimeoutSeconds > 0
       ? config.sessionTimeoutSeconds
@@ -383,6 +387,13 @@ public final class NeuronSDK: @unchecked Sendable {
     let identity = try resolveIdentity(userId: data.userId, anonymousId: data.anonymousId)
     var payload = try data.normalized(userId: identity.userId, anonymousId: identity.anonymousId)
     payload["client_ts"] = .string(iso8601String())
+    // In the body, not headers, like the JS SDK.
+    payload["platform"] = .string(
+      normalizeOptionalString(data.platform?.rawValue)
+        ?? normalizeOptionalString(payload["platform"]?.stringValue)
+        ?? platform.rawValue
+    )
+    payload["client"] = .string(Self.client)
 
     stateQueue.sync {
       if payload["request_id"] == nil,

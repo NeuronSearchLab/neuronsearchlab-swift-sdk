@@ -152,6 +152,13 @@ Lifecycle:
   30 minutes without an event (`sessionTimeoutSeconds`). A session id you set
   yourself (`SDKConfig(sessionId:)` or `setSessionId(_:)`) is never rotated.
 
+### Where events come from
+
+Every event carries `platform` (default `"ios"`; set `SDKConfig(platform:)`
+on a macOS, visionOS or server host, or per event with
+`TrackEventPayload(platform:)`) and `client` (`"swift-sdk/<version>"`). The
+console shows both.
+
 ### Consent
 
 Under UK and EU device-storage rules you may need consent before storing an
@@ -267,7 +274,9 @@ swift test
 
 ## Releasing
 
-Bump `VERSION` in a pull request. When it merges to `main`,
+Bump `VERSION` and run `scripts/sync-version.sh` (it regenerates
+`Sources/NeuronSearchLab/SDKVersion.swift`, which the `client` tag reads; a
+test fails while the two disagree) in a pull request. When it merges to `main`,
 `.github/workflows/tag-release.yml` runs the tests, tags `v<VERSION>` and
 publishes a GitHub release; Swift Package Manager resolves the new version
 from the tag.
